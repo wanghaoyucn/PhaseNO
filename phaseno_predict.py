@@ -180,8 +180,13 @@ for event_id in list(nc2020.keys()):
                 station_all.remove(x)
     
         else:
-            station_select = manual_stations + random.sample(auto_stations, num_station_split-len(manual_stations))
-            station_all = []
+            if len(manual_stations) < num_station_onerun_max:
+                station_select = manual_stations + random.sample(auto_stations, num_station_onerun_max-len(manual_stations))
+                station_all = []
+            else:
+                print(f"selecting {num_station_onerun_max} stations from {len(manual_stations)} manual stations at {event_id}")
+                station_select = random.sample(manual_stations, num_station_onerun_max)
+                station_all = [x for x in manual_stations if x not in station_select]
     
         print('selected station in one sample: ', station_select)
     
