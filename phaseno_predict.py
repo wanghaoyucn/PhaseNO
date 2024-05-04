@@ -143,7 +143,7 @@ if PLOT == 1:
 # ### load trained PhaseNO model
 
 # %%
-model = PhaseNO.load_from_checkpoint('./models/epoch=19-step=1140000.ckpt').to(device)
+model = PhaseNO.load_from_checkpoint(checkpoint_path='./models/epoch=19-step=1140000.ckpt', map_location=device).to(device)
 model.eval()
 
 # %% [markdown]
@@ -161,7 +161,8 @@ b, a = butter(4, highpass_filter/(sample_rate/2), 'highpass')
 for event_id in list(nc2020.keys()):
     event = nc2020[event_id]
     stations = list(event.keys())
-    manual_stations = [sta for sta in stations if sta.attrs['phase_status'] == 'manual']
+    manual_stations = [sta for sta in stations if event[sta].attrs['phase_status'] == 'manual']
+    auto_stations = [sta for sta in stations if sta not in manual_stations]
     picks_all_stations = []
     amps_all_stations  = []
 
@@ -179,7 +180,7 @@ for event_id in list(nc2020.keys()):
                 station_all.remove(x)
     
         else:
-            station_select = manual_stations
+            station_select = manual_stations + random.sample(auto_stations, num_station_split-len(manual_stations))
             station_all = []
     
         print('selected station in one sample: ', station_select)
@@ -222,7 +223,7 @@ for event_id in list(nc2020.keys()):
             sta = event[sta_id]
             waveforms[i] = sta[:,:nt]
 
-        starttime = datetime.strptime(event.attrs['start_time'], "%Y-%m-%dT%H:%M:%S.%f")
+        starttime = datetime.strptime(event.attrs['begin_time'], "%Y-%m-%dT%H:%M:%S.%f")
         endtime = datetime.strptime(event.attrs['end_time'], "%Y-%m-%dT%H:%M:%S.%f")
 
         ##### process raw amplitude for magnitude estimation #####  

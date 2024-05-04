@@ -39,14 +39,14 @@ def save_picks(picks, output_dir, dt=0.01, amps=None, fname=None):
         for pick in picks:
             for idx, prob in zip(pick.p_idx, pick.p_prob):
                 picks_.append(pd.DataFrame({"station_id": pick.station_id, 
-                            "phase_index": pick.p_idx,
+                            "phase_index": idx,
                             "phase_time":calc_timestamp(pick.t0, float(idx)*dt), 
                             "phase_score": prob.astype(float), 
                             "phase_amplitude": '',
                             "phase_type": "P"}, index=[0]))
             for idx, prob in zip(pick.s_idx, pick.s_prob):
                 picks_.append(pd.DataFrame({"station_id": pick.station_id, 
-                            "phase_index": pick.s_idx,
+                            "phase_index": idx,
                             "phase_time":calc_timestamp(pick.t0, float(idx)*dt), 
                             "phase_score": prob.astype(float), 
                             "phase_amplitude": '',
@@ -55,14 +55,14 @@ def save_picks(picks, output_dir, dt=0.01, amps=None, fname=None):
         for pick, amplitude in zip(picks, amps):
             for idx, prob, amp in zip(pick.p_idx, pick.p_prob, amplitude.p_amp[0]):
                 picks_.append(pd.DataFrame({"station_id": pick.station_id, 
-                            "phase_index": pick.p_idx,
+                            "phase_index": idx,
                             "phase_time":calc_timestamp(pick.t0, float(idx)*dt), 
                             "phase_score": prob.astype(float), 
                             "phase_amplitude": amp.astype(float),
                             "phase_type": "P"}, index=[0]))
             for idx, prob, amp in zip(pick.s_idx, pick.s_prob, amplitude.s_amp[0]):
                 picks_.append(pd.DataFrame({"station_id": pick.station_id, 
-                            "phase_index": pick.s_idx,
+                            "phase_index": idx,
                             "phase_time":calc_timestamp(pick.t0, float(idx)*dt), 
                             "phase_score": prob.astype(float), 
                             "phase_amplitude": amp.astype(float),
