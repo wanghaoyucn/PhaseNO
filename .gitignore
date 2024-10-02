@@ -2,3 +2,5 @@
 
 test.ipynb
 test*/
+*.txt
+metrics/

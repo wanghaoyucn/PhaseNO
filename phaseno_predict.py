@@ -22,7 +22,7 @@ import obspy
 from tqdm import tqdm
 from datetime import datetime, timedelta
 from collections import namedtuple
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, detrend
 
 import matplotlib.pyplot as plt
 import matplotlib
@@ -40,7 +40,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ### Set data path and parameters here
 
 # %%
-Data_Path   = '/nfs/quakeflow_dataset/NC/waveform_h5/2020.h5' # folder contains raw data
+Data_Path   = '/data/wanghy/2020.h5' # folder contains raw data
 station_info = './test_nc2020/nc2020_test_stations.csv'
 
 if not os.path.exists(station_info):
@@ -82,7 +82,7 @@ if not os.path.exists(station_info):
     df = df[['station_id', 'network', 'station', 'instrument', 'latitude', 'longitude', 'depth_km', 'elevation_m','local_depth_m', 'location', 'component', 'dt_s', 'unit']]
     df.to_csv(station_info, index=False)
 
-PROB = 0 # use 1 if you want to output predicted probability time series and then plotting with phaseno_plot.ipynb
+PROB = 1 # use 1 if you want to output predicted probability time series and then plotting with phaseno_plot.ipynb
 # consider PROB = 0 to save storage if processing a large amount of data 
 PICK = 1 # use 1 to output picks using a pikcing threshold (default threshold is 0.3)
 
@@ -99,8 +99,8 @@ if PICK == 1:
         os.makedirs(result_dir)
 
 threshold = 0.3 # probability threshold for picking
-num_station_split = 20 # number of stations in a run 
-num_station_onerun_max = 20 # maximum number of stations in a run on a GPU
+num_station_split = 16 # number of stations in a run
+num_station_onerun_max = 21 # maximum number of stations in a run on a GPU
 in_samples = 3000 # time window is 30 s in a run
 overlap = 1000 # use a 10-s overlap between two time windows
 steps = in_samples - overlap
@@ -158,7 +158,10 @@ nc2020 = h5py.File(Data_Path, 'r')
 b, a = butter(4, highpass_filter/(sample_rate/2), 'highpass')
 
 # loop over hourly data segment
-for event_id in list(nc2020.keys()):
+for event_id in list(nc2020.keys())[:8114]:
+    if os.path.exists(os.path.join(result_dir, event_id+'.csv')):
+        print(event_id, ' already processed')
+        continue
     event = nc2020[event_id]
     stations = list(event.keys())
     manual_stations = [sta for sta in stations if event[sta].attrs['phase_status'] == 'manual']
@@ -171,197 +174,215 @@ for event_id in list(nc2020.keys()):
     station_all = list(event.keys())
 
     print('number of stations: ', len(station_all))
+    try:
+        while len(station_all) > 0:
 
-    while len(station_all) > 0:
+            if len(station_all) <= num_station_onerun_max:
+                station_select = station_all[:len(station_all)]
+                for x in station_select:
+                    station_all.remove(x)
 
-        if len(station_all) <= num_station_onerun_max:
-            station_select = station_all[:len(station_all)]
-            for x in station_select:
-                station_all.remove(x)
-    
-        else:
-            if len(manual_stations) < num_station_onerun_max:
-                station_select = manual_stations + random.sample(auto_stations, num_station_onerun_max-len(manual_stations))
-                station_all = []
             else:
-                print(f"selecting {num_station_onerun_max} stations from {len(manual_stations)} manual stations at {event_id}")
-                station_select = random.sample(manual_stations, num_station_onerun_max)
-                station_all = [x for x in manual_stations if x not in station_select]
-    
-        print('selected station in one sample: ', station_select)
-    
-        df = stations_new.loc[station_select]
-        station_location = df[['longitude','latitude']].values
-        center = set_center(station_location)
-        x_min, y_min = center[0] - 1, center[1] - 1
+                if len(manual_stations) < num_station_onerun_max:
+                    station_select = manual_stations + random.sample(auto_stations, num_station_onerun_max-len(manual_stations))
+                    station_all = []
+                else:
+                    print(f"selecting {num_station_split} stations from {len(manual_stations)} manual stations at {event_id}")
+                    station_select = random.sample(manual_stations, num_station_split)
+                    station_all = [x for x in manual_stations if x not in station_select]
 
-        num_station = len(station_select)
+            print('selected station in one sample: ', station_select)
 
-        station_convert = station_location
-        station_convert = (station_location - [x_min, y_min]) / 2
-        station_convert = torch.from_numpy(station_convert).float()
+            df = stations_new.loc[station_select]
+            station_location = df[['longitude','latitude']].values
+            center = set_center(station_location)
+            x_min, y_min = center[0] - 1, center[1] - 1
 
-        # generate edge_index
-        row_a=[]
-        row_b=[]  
-        row_ix=[]
-        row_iy=[]
-        row_jx=[]
-        row_jy=[]
-        for i in range(num_station):
-            for j in range(num_station):
-                row_a.append(i)
-                row_b.append(j)
-                row_ix.append(station_convert[i,0])
-                row_iy.append(station_convert[i,1])
-                row_jx.append(station_convert[j,0])
-                row_jy.append(station_convert[j,1])
+            num_station = len(station_select)
 
-        edge_index=[row_a,row_b,row_ix,row_iy,row_jx,row_jy]
-        edge_index = torch.from_numpy(np.array(edge_index)).float().to(device)
-        
-        picks_select_stations = []
-        print('------------------------ reading waveforms ------------------------')
-        nt = event[station_select[0]][:].shape[1]
-        waveforms = np.zeros((num_station, 3, nt))
-        for i, sta_id in enumerate(station_select):
-            sta = event[sta_id]
-            waveforms[i] = sta[:,:nt]
+            station_convert = station_location
+            station_convert = (station_location - [x_min, y_min]) / 2
+            station_convert = torch.from_numpy(station_convert).float()
 
-        starttime = datetime.strptime(event.attrs['begin_time'], "%Y-%m-%dT%H:%M:%S.%f")
-        endtime = datetime.strptime(event.attrs['end_time'], "%Y-%m-%dT%H:%M:%S.%f")
+            # generate edge_index
+            row_a=[]
+            row_b=[]  
+            row_ix=[]
+            row_iy=[]
+            row_jx=[]
+            row_jy=[]
+            for i in range(num_station):
+                for j in range(num_station):
+                    row_a.append(i)
+                    row_b.append(j)
+                    row_ix.append(station_convert[i,0])
+                    row_iy.append(station_convert[i,1])
+                    row_jx.append(station_convert[j,0])
+                    row_jy.append(station_convert[j,1])
 
-        ##### process raw amplitude for magnitude estimation #####  
+            edge_index=[row_a,row_b,row_ix,row_iy,row_jx,row_jy]
+            edge_index = torch.from_numpy(np.array(edge_index)).float().to(device)
 
-        data_raw = np.zeros((num_station, 3, nt))
-        for i, sta_id in enumerate(station_select):
-            sta = event[sta_id]
-            tmp = sta[:,:nt]
-            if sta.attrs["unit"][-6:] == "m/s**2":
-                tmp = np.cumsum(tmp*sta.attrs['dt_s'], axis=1)
-                # highpass filter
-                if highpass_filter > 0:
-                    tmp = filtfilt(b, a, tmp, axis=1)
-            data_raw[i] = tmp
+            picks_select_stations = []
+            print('------------------------ reading waveforms ------------------------')
+            nt = event[station_select[0]][:].shape[1]
+            waveforms = np.zeros((num_station, 3, nt))
+            for i, sta_id in enumerate(station_select):
+                sta = event[sta_id]
+                waveforms[i] = sta[:,:nt]
+            waveforms = detrend(waveforms, axis=2, type='constant')
+            if highpass_filter > 0:
+                waveforms = filtfilt(b, a, waveforms, axis=2)
 
-        preds = []
-        starts = []
+            #if len(mseed) < 3:
+            #    for r in np.arange(3-len(mseed)):
+            #        mseed.append(mseed[0])
+            for i in range(num_station):
+                for j in range(waveforms.shape[1]):
+                    if np.any(np.abs(waveforms[i,j])>1e-6):
+                        continue
+                    else:
+                        waveforms[i,j] = waveforms[i,-1]
 
-        t0 = starttime.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-        print('t0=', t0)
+            starttime = datetime.strptime(event.attrs['begin_time'], "%Y-%m-%dT%H:%M:%S.%f")
+            endtime = datetime.strptime(event.attrs['end_time'], "%Y-%m-%dT%H:%M:%S.%f")
 
-        print('------------------------ start predicting ------------------------')
+            ##### process raw amplitude for magnitude estimation #####  
 
-        for (windowed_st,idx) in slide_window(waveforms, in_samples, steps, axis=2): 
-            start_trim = starttime + timedelta(seconds=idx/sample_rate)
-            end_trim = start_trim + timedelta(seconds=in_samples/sample_rate)
-            temp = windowed_st.astype(float)
+            data_raw = np.zeros((num_station, 3, nt))
+            for i, sta_id in enumerate(station_select):
+                sta = event[sta_id]
+                tmp = sta[:,:nt]
+                if sta.attrs["unit"][-6:] == "m/s**2":
+                    tmp = np.cumsum(tmp*sta.attrs['dt_s'], axis=1)
+                    # highpass filter
+                    if highpass_filter > 0:
+                        tmp = filtfilt(b, a, tmp, axis=1)
+                data_raw[i] = tmp
 
-            temp_mean = np.mean(temp,axis=-1,keepdims=True)
-            temp_std  = np.std(temp,axis=-1,keepdims=True)
-            temp_std[temp_std==0] = 1
-            temp = (temp-temp_mean)/(temp_std+eps)
+            preds = []
+            starts = []
 
-            X = np.zeros((num_station, 3+2, in_samples))
-            X[:,:3,:] = temp/10
+            t0 = starttime.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+            print('t0=', t0)
 
-            for istation in np.arange(num_station):
-                X[istation,3,:] = station_convert[istation,0]
-                X[istation,4,:] = station_convert[istation,1]
+            print('------------------------ start predicting ------------------------')
 
-            X = torch.tensor(X, dtype=torch.float)
-            X = X.to(device)
-            res=torch.sigmoid(model.forward((X,None,edge_index)))
-            preds.append(res.cpu().detach().numpy())
-            starts.append(idx)
+            for (windowed_st,idx) in slide_window(waveforms, in_samples, steps, axis=2): 
+                start_trim = starttime + timedelta(seconds=idx/sample_rate)
+                end_trim = start_trim + timedelta(seconds=in_samples/sample_rate)
+                temp = windowed_st.astype(float)
 
-        print('------------------------ start post-processing ------------------------')
+                temp_mean = np.mean(temp,axis=-1,keepdims=True)
+                temp_std  = np.std(temp,axis=-1,keepdims=True)
+                temp_std[temp_std==0] = 1
+                temp = (temp-temp_mean)/(temp_std+eps)
 
-        gc.collect()
+                X = np.zeros((num_station, 3+2, in_samples))
+                X[:,:3,:] = temp/10
 
-        prediction_sample_factor=1
-        # Maximum number of predictions covering a point
-        coverage = int(
-            np.ceil(in_samples / (in_samples - overlap) + 1)
-        )
-        
-        pred_length = int(
-            np.ceil(
-                (np.max(starts)+in_samples) * prediction_sample_factor
+                for istation in np.arange(num_station):
+                    X[istation,3,:] = station_convert[istation,0]
+                    X[istation,4,:] = station_convert[istation,1]
+
+                X = torch.tensor(X, dtype=torch.float)
+                X = X.to(device)
+                res=torch.sigmoid(model.forward((X,None,edge_index)))
+                preds.append(res.cpu().detach().numpy())
+                starts.append(idx)
+
+            print('------------------------ start post-processing ------------------------')
+
+            gc.collect()
+
+            prediction_sample_factor=1
+            # Maximum number of predictions covering a point
+            coverage = int(
+                np.ceil(in_samples / (in_samples - overlap) + 1)
             )
-        )
-        pred_merge = (
-            np.zeros_like(
-                preds[0], shape=( preds[0].shape[0],preds[0].shape[1], pred_length, coverage)
+
+            pred_length = int(
+                np.ceil(
+                    (np.max(starts)+in_samples) * prediction_sample_factor
+                )
             )
-            * np.nan
-        )
+            pred_merge = (
+                np.zeros_like(
+                    preds[0], shape=( preds[0].shape[0],preds[0].shape[1], pred_length, coverage)
+                )
+                * np.nan
+            )
 
-        for i, (pred, start) in enumerate(zip(preds, starts)):
-            pred_start = int(start * prediction_sample_factor)
-            pred_merge[
-                :,:, pred_start : pred_start + pred.shape[2], i % coverage
-            ] = pred
+            for i, (pred, start) in enumerate(zip(preds, starts)):
+                pred_start = int(start * prediction_sample_factor)
+                pred_merge[
+                    :,:, pred_start : pred_start + pred.shape[2], i % coverage
+                ] = pred
 
-        del preds
-        gc.collect()
+            del preds
+            gc.collect()
 
-        if PICK == 1:
+            if PICK == 1:
 
-            p_idx, p_prob, s_idx, s_prob = [], [], [], []
-            picks_part_stations = []
-            for k in range(num_station):
-                id = station_select[k]
-                sta = station_select[k]
-                pred = np.nanmean(pred_merge[k], axis=-1)
-                P_seq, _, _ = _trim_nan(pred[0])
-                S_seq, _, _ = _trim_nan(pred[1])
-                p, p_pro =_detect_peaks(P_seq[:12000], mph=threshold, mpd=1.0*sample_rate)
-                s, s_pro =_detect_peaks(S_seq[:12000], mph=threshold, mpd=1.0*sample_rate)
+                p_idx, p_prob, s_idx, s_prob = [], [], [], []
+                picks_part_stations = []
+                for k in range(num_station):
+                    id = station_select[k]
+                    sta = station_select[k]
+                    pred = np.nanmean(pred_merge[k], axis=-1)
+                    P_seq, _, _ = _trim_nan(pred[0])
+                    S_seq, _, _ = _trim_nan(pred[1])
+                    p, p_pro =_detect_peaks(P_seq[:12000], mph=threshold, mpd=1.0*sample_rate)
+                    s, s_pro =_detect_peaks(S_seq[:12000], mph=threshold, mpd=1.0*sample_rate)
 
-                picks_part_stations.append(record(id, sta, t0, list(p), list(p_pro), list(s), list(s_pro)))
+                    picks_part_stations.append(record(id, sta, t0, list(p), list(p_pro), list(s), list(s_pro)))
 
-            amps_part_stations = extract_amplitude(data_raw, picks_part_stations, window_p=8, window_s=4, dt=1/sample_rate)
-            
-            picks_all_stations += picks_part_stations
-            amps_all_stations += amps_part_stations
+                amps_part_stations = extract_amplitude(data_raw, picks_part_stations, window_p=8, window_s=4, dt=1/sample_rate)
 
-        if PROB == 1:
-            for k in range(num_station):
+                picks_all_stations += picks_part_stations
+                amps_all_stations += amps_part_stations
 
-                #id = fname[k]
-                output = obspy.Stream()
-                pred = np.nanmean(pred_merge[k], axis=-1)
+            if PROB == 1:
+                for k in range(num_station):
 
-                for i in range(2):
+                    #id = fname[k]
+                    output = obspy.Stream()
+                    pred = np.nanmean(pred_merge[k], axis=-1)
 
-                    trimmed_pred, f, _ = _trim_nan(pred[i])
-                    trimmed_start = starttime + f / sample_rate
+                    for i in range(2):
 
-                    output.append(
-                        obspy.Trace(
-                            trimmed_pred,
-                            {
-                                "starttime": trimmed_start,
-                                "sampling_rate": sample_rate,
-                                "network": df.loc[station_select[k]]['network'],
-                                "station": df.loc[station_select[k]]['station'],
-                                "location": df.loc[station_select[k]]['location'],
-                                "channel": label_name[i],
-                            },
+                        trimmed_pred, f, _ = _trim_nan(pred[i])
+                        trimmed_start = starttime + (f / sample_rate) * timedelta(seconds=1)
+
+                        output.append(
+                            obspy.Trace(
+                                trimmed_pred,
+                                {
+                                    "starttime": trimmed_start,
+                                    "sampling_rate": sample_rate,
+                                    "network": df.loc[station_select[k]]['network'],
+                                    "station": df.loc[station_select[k]]['station'],
+                                    "location": df.loc[station_select[k]]['location'],
+                                    "channel": label_name[i],
+                                },
+                            )
                         )
-                    )
 
-                output.write(os.path.join(prob_dir, station_select[k]+'.mseed'), format='MSEED')
-                del output
-                gc.collect()
+                    output.write(os.path.join(prob_dir, station_select[k]+'.mseed'), format='MSEED')
+                    del output
+                    gc.collect()
 
-        del pred_merge
-        gc.collect()
+            del pred_merge
+            gc.collect()
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
 
-        print('------------------------select stations done ------------------------')
+            print('------------------------select stations done ------------------------')
 
-    print('========================',event_id,' done ========================')
+        print('========================',event_id,' done ========================')
+    except Exception as e:
+        print('error at ', event_id, e)
+        continue
 
     if PICK == 1:
         save_picks(picks_all_stations, result_dir, dt=1/sample_rate, amps=amps_all_stations,fname=event_id+'.csv')
